@@ -9,13 +9,20 @@ from app.database import get_db, get_db_optional, init_db
 from app.models.health_check import HealthCheck
 from app.models.monitor import Monitor
 from app.monitoring.checker import check_url
+from app.monitoring.alert_manager import process_monitor_result
+from app.monitoring.scheduler import monitor_scheduler, run_monitor_check
 from app.schemas.monitor import HealthCheckRead, MonitorCreate, MonitorRead
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
-    yield
+    monitor_scheduler.start()
+    await monitor_scheduler.sync_from_database()
+    try:
+        yield
+    finally:
+        monitor_scheduler.shutdown()
 
 
 app = FastAPI(title=settings.APP_NAME, version=settings.APP_VERSION, lifespan=lifespan)
@@ -49,15 +56,7 @@ async def check_url_endpoint(
         if monitor is None:
             raise HTTPException(status_code=404, detail="Monitor not found")
 
-        history_entry = HealthCheck(
-            monitor_id=monitor.id,
-            status_code=result["status_code"],
-            latency_ms=result["latency_ms"],
-            is_healthy=result["is_healthy"],
-            error_message=result["error"],
-        )
-        db.add(history_entry)
-        await db.commit()
+        await process_monitor_result(db, monitor, result)
 
     return result
 
@@ -68,6 +67,7 @@ async def create_monitor(payload: MonitorCreate, db: AsyncSession = Depends(get_
     db.add(monitor)
     await db.commit()
     await db.refresh(monitor)
+    monitor_scheduler.register_monitor(monitor)
     return monitor
 
 
@@ -86,18 +86,7 @@ async def save_monitor_check(
     if monitor is None:
         raise HTTPException(status_code=404, detail="Monitor not found")
 
-    result = await check_url(monitor.url, timeout=5.0)
-    entry = HealthCheck(
-        monitor_id=monitor.id,
-        status_code=result["status_code"],
-        latency_ms=result["latency_ms"],
-        is_healthy=result["is_healthy"],
-        error_message=result["error"],
-    )
-    db.add(entry)
-    await db.commit()
-    await db.refresh(entry)
-    return entry
+    return await run_monitor_check(db, monitor)
 
 
 @app.get("/monitors/{monitor_id}/checks", response_model=list[HealthCheckRead])

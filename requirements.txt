@@ -9,4 +9,5 @@ asyncpg
 psycopg[binary]
 python-dotenv
 greenlet
-
+APScheduler
+aiosqlite
